@@ -9,7 +9,7 @@ The benchmark deliberately compares:
 - **Cold**: a brand-new, isolated Chromium browser context with empty HTTP cache and storage.
 - **Warm**: a second navigation to the same URL within that context, reusing its cache/storage. This is a **warm page reload**, not simply revisiting an already-open tab.
 
-The benchmark runs five cold/warm pairs for each view by default and produces `results.json`, `runs.csv`, and `summary.md` with medians and P90 values. Everything runs on **your computer**, so the LMS host stays private on your LAN.
+The benchmark runs five cold/warm pairs for each view by default and produces `results.json`, `runs.csv`, and `summary.md` with medians and P90 values. It also instruments the **initial player-status sequence** in the benchmark browser to test the hypothesis that the deferred Now Playing code sometimes misses the first status message. Everything runs on **your computer**, so the LMS host stays private on your LAN.
 
 ## Windows 11 quick start (PowerShell)
 
@@ -43,6 +43,15 @@ Default output: `performance/results/YYYYMMDD-HHMMSS/` (gitignored). You can ove
 | `np_visible_total_ms` | Visible `#np-page` in the fully expanded Now Playing view. May not occur for the normal UI. |
 | `track_visible_total_ms` | Non-empty visible title in `#np-page .np-title`. Can be missing when player is idle. |
 | `cover_visible_total_ms` | Visible, image-loaded `#np-page img.np-cover`. A placeholder cover also counts. |
+| `artwork_candidate_visible_total_ms` | First image-loaded Now Playing cover whose source is **not** one of Material Skin's three known placeholder constants. This is a *candidate*, not proof of real cover art: an LMS-supplied generic image can still qualify. |
+| `deferred_function_ready_total_ms` | First observation that `nowplayingOnPlayerStatus()` from the deferred `nowplaying-functions.js` is available. |
+| `bus_hook_ready_total_ms` | When the benchmark attached its passive event-bus observer; status events before this point cannot be counted. |
+| `first_player_status_total_ms` | First observed `playerStatus` event received from Material Skin's event bus. |
+| `first_status_with_title_total_ms` | First observed status event containing a nonempty track-title field. The **value is never saved**. |
+| `first_status_had_deferred`, `status_before_deferred_count` | Whether the deferred handler was available at the first observed status event and how many status events preceded it. |
+| `first_retry_scheduled_total_ms`, `retry_scheduled_count` | A 1000-ms timer scheduled from `nowplaying-page.js` during a player-status event – matches the existing fallback code's signature. It is not proof of the underlying exception's cause. |
+| `first_refresh_after_retry_total_ms` | A later `refreshStatus` event within 850–1350 ms after the first retry timer was scheduled. Timing correlation, not a definitive causal link. |
+| `request_timeline` | First/last start/finish windows for generic JSON-RPC, CometD and script categories, plus the `nowplaying-functions.js` resource when observed. Relative to **final document navigation**, unlike total metrics. |
 | `ttfb_ms` | Navigation `responseStart`, relative to the **final** HTML document (does not include the `np-only` redirect). |
 | `dom_content_loaded_ms`, `load_end_ms` | Final document navigation timings. `loadEnd` may be `0` if observation ends early. |
 | `fcp_ms`, `lcp_ms` | Browser paint metrics for the final document. Missing values are explicitly null. |
@@ -50,7 +59,7 @@ Default output: `performance/results/YYYYMMDD-HHMMSS/` (gitignored). You can ove
 | `resource_groups`, `slowest_resources` | Aggregated resource counts, transfer sizes and slowest requests (static JS filenames or **generic categories**, never URL query strings). |
 | `http_errors`, `failed_requests`, `script_errors` | Error counts for the observation window. Long-polling/CometD requests can occasionally be canceled as part of a navigation. |
 
-The tool uses a small `PerformanceObserver`/`MutationObserver` probe injected **only into the benchmark browser**. It does not install or modify code on your LMS server. Readiness is an *observable UI proxy*, not an official Material Skin lifecycle event. CPU profiles will help validate why a metric is slow; they do not directly identify server-side bottlenecks. `resource_groups.duration_ms_total` sums durations of overlapping requests and is **not** the elapsed wall time.
+The tool uses a small `PerformanceObserver`/`MutationObserver` probe injected **only into the benchmark browser**. For startup diagnostics, it also observes `bus.$emit` (only the event name and whether a title exists) and watches for a 1000-ms `setTimeout` scheduled inside the upstream Now Playing status handler. All original callbacks and delays are forwarded unchanged; Material Skin itself is not modified. This can introduce a little measurement overhead and should not be treated as an official lifecycle API. It does not install or modify code on your LMS server. Readiness is an *observable UI proxy*, not an official Material Skin lifecycle event. CPU profiles will help validate why a metric is slow; they do not directly identify server-side bottlenecks. `resource_groups.duration_ms_total` sums durations of overlapping requests and is **not** the elapsed wall time.
 
 The `summary.md` is a quick comparison; per-run details and sanitized slowest-resource lists are in `results.json`. `runs.csv` is convenient for Excel or further statistical analysis. The browser window size is fixed at 1440×900, device scale factor 1; keep the same machine, server state, display settings and player for before/after comparisons. For best comparability, keep a track playing during measurements, but the benchmark never starts playback itself.
 
@@ -70,6 +79,27 @@ The `summary.md` is a quick comparison; per-run details and sanitized slowest-re
 
 **WARNING:** These opt-in files are **raw and sensitive**. Traces/HAR can contain your LAN IP address, complete URLs and query parameters (including player IDs), headers and potentially playlist or authentication information; screenshots display private music details. Keep them on your computer and sanitize them before sharing. They are excluded from Git by default. Never upload raw traces/HAR to a public issue.
 
+## Investigating the initial player-status delay
+
+The full result includes a new **First-player-status diagnostics** table in `summary.md`. These are the most useful values for `/material/np-only`:
+
+- **First status earlier than deferred function** (`first_player_status_total_ms` < `deferred_function_ready_total_ms`), followed by `status_before_deferred_count > 0`, suggests a load-order problem.
+- **Retry scheduled** (`retry_scheduled_count > 0`) indicates that a 1000-ms timer was scheduled in the upstream Now Playing event-handling code; combined with the missing-function observation, it strongly supports the suspected fallback path.
+- **Function ready before first status, no retry**, but title still late: investigate LMS/CometD status delivery, Vue rendering, or the actual server response instead.
+- **A title-bearing status arrived, but the UI title appeared much later**: look for errors in handling the status, or rendering delays.
+
+Not all fields will appear: they can be null if the player is idle, the script never finishes, the browser attaches after an event, or an alternative Material Skin version uses another code path. **A missing or zero retry count is not proof no retry occurred**, particularly if the event-bus observer attached late. Compare the `bus_hook_ready_total_ms` offset to `first_player_status_total_ms`.
+
+The diagnosis is intentionally *non-invasive*: no exceptions are suppressed, no network requests are delayed or blocked, and no player-status contents are retained. It cannot prove why the fallback was scheduled without more targeted instrumentation in a separate test branch.
+
+Allow adequate observation time for slower player status retrieval (default `--observe-ms 3500`, or explicitly `--observe-ms 5000`). A second run with `--view np-only --runs 5 --headed` is enough; repeating the normal UI is optional.
+
+```powershell
+.\performance\.venv\Scripts\python.exe performance\benchmark.py --base-url "http://192.168.1.10:9000" --view np-only --runs 5 --headed --observe-ms 5000
+```
+
+The local server address above is an **example** and must be replaced. Please share only `summary.md`, `runs.csv` and `results.json`; do not upload opt-in raw HAR/CDP recordings or screenshots unless they have been carefully sanitized.
+
 ## Troubleshooting and interpretation
 
 - **Playwright's browser is not installed:** Run `python -m playwright install chromium` using the same virtual environment. `--chromium-path` can also point to a local Chromium executable.
@@ -81,7 +111,7 @@ The `summary.md` is a quick comparison; per-run details and sanitized slowest-re
 - **Headless vs headed:** Headed (`--headed`) is closer to an interactive desktop; keep the same mode for comparisons. Neither mode exactly reproduces Android System WebView/Fire TV performance.
 - **Server-side delays:** If TTFB or JSON-RPC requests are slow, inspect LMS CPU/load/I/O separately. This browser benchmark does not collect server process metrics.
 
-Run unit tests without a server:
+Run unit tests without an LMS server. The additional browser probe test runs when Chromium is installed (otherwise it is skipped):
 
 ```powershell
 .\performance\.venv\Scripts\python.exe -m unittest discover -s performance -p "test_*.py" -v

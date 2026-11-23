@@ -25,8 +25,18 @@ except ImportError:
 
 
 PROBE_SCRIPT = r"""(() => {
-  const values = { appReady: null, npVisible: null, trackVisible: null,
-                   coverVisible: null, longTasks: [], fcp: null, lcp: null };
+  const values = {
+    appReady: null, npVisible: null, trackVisible: null,
+    coverVisible: null, artworkCandidateVisible: null,
+    deferredFunctionReady: null, busHookReady: null,
+    firstPlayerStatus: null, firstStatusWithTitle: null,
+    firstRefreshStatus: null, firstRefreshAfterRetry: null,
+    firstRetryScheduled: null, statusCount: 0,
+    statusWithTitleCount: 0, statusBeforeDeferredCount: 0,
+    retryScheduledCount: 0, refreshStatusCount: 0,
+    firstStatusHadDeferred: null,
+    longTasks: [], fcp: null, lcp: null
+  };
   Object.defineProperty(window, '__materialBenchmark', {value: values});
   try {
     new PerformanceObserver(list => {
@@ -45,41 +55,125 @@ PROBE_SCRIPT = r"""(() => {
       for (const item of list.getEntries()) values.lcp = item.startTime;
     }).observe({type: 'largest-contentful-paint', buffered: true});
   } catch (_) {}
-  let queued = false;
+
+  // Observe existing Material events without reading/saving any status payload.
+  // In particular no player ID, title, URL, authentication or playlist data is exported.
+  let statusDispatchDepth = 0;
+  function attachBus() {
+    const bus = window.bus;
+    if (!bus || typeof bus.$emit !== 'function' || values.busHookReady !== null) return;
+    const original = bus.$emit;
+    bus.$emit = function(name) {
+      if (name === 'refreshStatus') {
+        const now = performance.now();
+        values.refreshStatusCount++;
+        if (values.firstRefreshStatus === null) values.firstRefreshStatus = now;
+        if (values.firstRetryScheduled !== null && values.firstRefreshAfterRetry === null
+            && now - values.firstRetryScheduled >= 850
+            && now - values.firstRetryScheduled <= 1350) {
+          values.firstRefreshAfterRetry = now;
+        }
+      }
+      if (name !== 'playerStatus') return original.apply(this, arguments);
+      const now = performance.now();
+      const deferredAvailable = typeof window.nowplayingOnPlayerStatus === 'function';
+      values.statusCount++;
+      if (values.firstPlayerStatus === null) {
+        values.firstPlayerStatus = now;
+        values.firstStatusHadDeferred = deferredAvailable;
+      }
+      if (!deferredAvailable) values.statusBeforeDeferredCount++;
+      // Inspect only the existence of title data; never record its value.
+      const data = arguments[1];
+      if (data && data.current && typeof data.current.title === 'string' && data.current.title.length > 0) {
+        values.statusWithTitleCount++;
+        if (values.firstStatusWithTitle === null) values.firstStatusWithTitle = now;
+      }
+      statusDispatchDepth++;
+      try { return original.apply(this, arguments); }
+      finally { statusDispatchDepth--; }
+    };
+    values.busHookReady = performance.now();
+  }
+
+  // The upstream catch block in nowplaying-page.js schedules a 1000 ms retry.
+  // Observe the scheduling during a playerStatus emission without changing the
+  // callback, arguments or delay. The caller check avoids the unrelated 1000 ms
+  // layout timer elsewhere in the component. This is a retry *signature*, not
+  // evidence of why an exception was thrown.
+  const nativeSetTimeout = window.setTimeout;
+  window.setTimeout = function(callback, delay) {
+    if (statusDispatchDepth && Number(delay) === 1000) {
+      const stack = (new Error()).stack || '';
+      if (stack.includes('nowplaying-page.js')) {
+        values.retryScheduledCount++;
+        if (values.firstRetryScheduled === null) values.firstRetryScheduled = performance.now();
+      }
+    }
+    return nativeSetTimeout.apply(this, arguments);
+  };
+
   function visible(element) {
     if (!element || !element.isConnected) return false;
     const style = window.getComputedStyle(element);
     return style.display !== 'none' && style.visibility !== 'hidden'
       && element.getClientRects().length > 0;
   }
+  function placeholderImage(img) {
+    const source = img.currentSrc || img.src || '';
+    if (!source) return true;
+    // Material declares these as top-level consts (not necessarily window props).
+    const known = [
+      typeof DEFAULT_COVER === 'string' ? DEFAULT_COVER : window.DEFAULT_COVER,
+      typeof LMS_BLANK_COVER === 'string' ? LMS_BLANK_COVER : window.LMS_BLANK_COVER,
+      typeof DEFAULT_RADIO_COVER === 'string' ? DEFAULT_RADIO_COVER : window.DEFAULT_RADIO_COVER
+    ];
+    for (const val of known) {
+      if (typeof val === 'string' && val) {
+        try {
+          if (new URL(source, location.href).href === new URL(val, location.href).href) return true;
+        } catch (_) {}
+      }
+    }
+    return false;
+  }
   function check() {
-    queued = false;
+    attachBus();
+    if (values.deferredFunctionReady === null && typeof window.nowplayingOnPlayerStatus === 'function') {
+      values.deferredFunctionReady = performance.now();
+    }
     const root = document.getElementById('app');
     const mounted = root && !root.hasAttribute('v-cloak')
       && visible(root.querySelector('.lms-app'));
     if (mounted && values.appReady === null) values.appReady = performance.now();
     const np = document.getElementById('np-page');
-    if (mounted && visible(np) && values.npVisible === null) {
-      values.npVisible = performance.now();
-    }
+    if (mounted && visible(np) && values.npVisible === null) values.npVisible = performance.now();
     const title = np && np.querySelector('.np-title');
     if (mounted && visible(np) && visible(title) && title.textContent.trim()
         && values.trackVisible === null) values.trackVisible = performance.now();
     const cover = np && np.querySelector('img.np-cover');
-    if (mounted && visible(np) && visible(cover) && cover.complete
-        && cover.naturalWidth > 0 && values.coverVisible === null) {
-      values.coverVisible = performance.now();
+    if (mounted && visible(np) && visible(cover) && cover.complete && cover.naturalWidth > 0) {
+      if (values.coverVisible === null) values.coverVisible = performance.now();
+      // Unlike coverVisible, excludes the placeholder constants defined by Material.
+      // May still be a server-supplied generic image, hence "candidate".
+      if (values.artworkCandidateVisible === null && !placeholderImage(cover)) {
+        values.artworkCandidateVisible = performance.now();
+      }
     }
   }
+  let queued = false;
   function schedule() {
     if (!queued) {
       queued = true;
-      requestAnimationFrame(check);
+      requestAnimationFrame(() => { queued = false; check(); });
     }
   }
   new MutationObserver(schedule).observe(document, {subtree:true, childList:true, attributes:true, characterData:true});
   document.addEventListener('DOMContentLoaded', schedule, {once:true});
+  document.addEventListener('load', schedule, true); // image load does not trigger DOM mutation
   window.addEventListener('load', schedule, {once:true});
+  const sampleTimer = setInterval(check, 25); // captures dynamically loaded deferred functions
+  setTimeout(() => clearInterval(sampleTimer), 12000);
   schedule();
 })()"""
 
@@ -88,7 +182,8 @@ JS_RESULTS = r"""() => {
   const timings = window.__materialBenchmark || {};
   const stats = performance.getEntriesByType('resource');
   const resources = stats.map(r => ({
-    type: r.initiatorType, duration: r.duration, transferSize: r.transferSize,
+    type: r.initiatorType, startTime: r.startTime,
+    responseEnd: r.responseEnd, duration: r.duration, transferSize: r.transferSize,
     encodedBodySize: r.encodedBodySize,
     // Browser-side classification only: never export original request URLs.
     pathClass: (() => {
@@ -119,7 +214,21 @@ JS_RESULTS = r"""() => {
   return {
     timeOrigin: performance.timeOrigin,
     marks: {appReady: timings.appReady, npVisible: timings.npVisible,
-            trackVisible: timings.trackVisible, coverVisible: timings.coverVisible},
+            trackVisible: timings.trackVisible, coverVisible: timings.coverVisible,
+            artworkCandidateVisible: timings.artworkCandidateVisible,
+            deferredFunctionReady: timings.deferredFunctionReady,
+            busHookReady: timings.busHookReady,
+            firstPlayerStatus: timings.firstPlayerStatus,
+            firstStatusWithTitle: timings.firstStatusWithTitle,
+            firstRefreshStatus: timings.firstRefreshStatus,
+            firstRetryScheduled: timings.firstRetryScheduled,
+            firstRefreshAfterRetry: timings.firstRefreshAfterRetry},
+    diagnostics: {statusCount: timings.statusCount || 0,
+                  statusWithTitleCount: timings.statusWithTitleCount || 0,
+                  statusBeforeDeferredCount: timings.statusBeforeDeferredCount || 0,
+                  retryScheduledCount: timings.retryScheduledCount || 0,
+                  refreshStatusCount: timings.refreshStatusCount || 0,
+                  firstStatusHadDeferred: timings.firstStatusHadDeferred},
     fcp: timings.fcp, lcp: timings.lcp,
     longTasks: timings.longTasks || [],
     nav: nav && {
@@ -166,6 +275,33 @@ def resource_summary(resources: list[dict]) -> dict:
                   'transfer_kb': round(val['transfer_kb'], 1)} for key, val in sorted(groups.items())}
 
 
+def request_timeline(resources: list[dict]) -> dict:
+    """Navigation-relative request windows; overlapping timings are never summed.
+
+    Only generic request categories and the fixed deferred script are reported.
+    All values are relative to the final HTML navigation, not the np-only redirect.
+    """
+    watched = ('lms-jsonrpc', 'lms-cometd', 'material-js', 'library-js')
+    result = {}
+    for name in watched:
+        selected = [r for r in resources if r.get('pathClass') == name]
+        if not selected:
+            continue
+        result[name] = {
+            'count': len(selected),
+            'first_start_ms': safe_milliseconds(min(r.get('startTime') or 0 for r in selected)),
+            'first_finished_ms': safe_milliseconds(min(r.get('responseEnd') or 0 for r in selected)),
+            'last_finished_ms': safe_milliseconds(max(r.get('responseEnd') or 0 for r in selected)),
+        }
+    deferred = [r for r in resources if r.get('safeName', '').endswith('/nowplaying-functions.js')]
+    if deferred:
+        result['nowplaying-functions.js'] = {
+            'first_start_ms': safe_milliseconds(min(r.get('startTime') or 0 for r in deferred)),
+            'first_finished_ms': safe_milliseconds(min(r.get('responseEnd') or 0 for r in deferred)),
+        }
+    return result
+
+
 def slowest_resources(resources: list[dict], limit: int = 15) -> list[dict]:
     ranked = sorted(resources, key=lambda item: item.get('duration') or 0, reverse=True)
     return [{'asset': r.get('safeName') or r.get('pathClass') or 'other',
@@ -205,6 +341,14 @@ def report_summary(rows: list[dict]) -> dict:
                 'np_visible_median_ms': median('np_visible_total_ms'),
                 'track_visible_median_ms': median('track_visible_total_ms'),
                 'cover_visible_median_ms': median('cover_visible_total_ms'),
+                'artwork_candidate_median_ms': median('artwork_candidate_visible_total_ms'),
+                'deferred_function_ready_median_ms': median('deferred_function_ready_total_ms'),
+                'first_status_median_ms': median('first_player_status_total_ms'),
+                'first_status_with_title_median_ms': median('first_status_with_title_total_ms'),
+                'first_retry_scheduled_median_ms': median('first_retry_scheduled_total_ms'),
+                'retry_scheduled_runs': sum(bool(r.get('retry_scheduled_count')) for r in items),
+                'status_before_deferred_runs': sum(bool(r.get('status_before_deferred_count')) for r in items),
+                'first_status_had_deferred_runs': sum(r.get('first_status_had_deferred') is True for r in items),
                 'ttfb_median_ms': median('ttfb_ms'),
                 'dom_content_loaded_median_ms': median('dom_content_loaded_ms'),
                 'fcp_median_ms': median('fcp_ms'),
@@ -326,6 +470,7 @@ async def measure(page, origin: str, view: str, mode: str, player: str | None,
             return None
         return safe_milliseconds(time_origin + val - started_epoch)
     long_tasks = probe.get('longTasks') or []
+    diagnostics = probe.get('diagnostics') or {}
     resources = probe.get('resources') or []
     return {
         'view': view, 'mode': mode, 'error': error,
@@ -334,6 +479,20 @@ async def measure(page, origin: str, view: str, mode: str, player: str | None,
         'np_visible_total_ms': total('npVisible'),
         'track_visible_total_ms': total('trackVisible'),
         'cover_visible_total_ms': total('coverVisible'),
+        'artwork_candidate_visible_total_ms': total('artworkCandidateVisible'),
+        'deferred_function_ready_total_ms': total('deferredFunctionReady'),
+        'bus_hook_ready_total_ms': total('busHookReady'),
+        'first_player_status_total_ms': total('firstPlayerStatus'),
+        'first_status_with_title_total_ms': total('firstStatusWithTitle'),
+        'first_refresh_status_total_ms': total('firstRefreshStatus'),
+        'first_retry_scheduled_total_ms': total('firstRetryScheduled'),
+        'first_refresh_after_retry_total_ms': total('firstRefreshAfterRetry'),
+        'first_status_had_deferred': diagnostics.get('firstStatusHadDeferred'),
+        'player_status_count': diagnostics.get('statusCount', 0),
+        'status_with_title_count': diagnostics.get('statusWithTitleCount', 0),
+        'status_before_deferred_count': diagnostics.get('statusBeforeDeferredCount', 0),
+        'retry_scheduled_count': diagnostics.get('retryScheduledCount', 0),
+        'refresh_status_count': diagnostics.get('refreshStatusCount', 0),
         # Below metrics are relative to the final document navigation. A JS
         # redirect from /np-only is NOT included in these browser nav numbers.
         'ttfb_ms': safe_milliseconds(nav.get('responseStart')),
@@ -348,6 +507,7 @@ async def measure(page, origin: str, view: str, mode: str, player: str | None,
         'request_count': event['requests'], 'http_errors': event['http_errors'],
         'failed_requests': event['failed_requests'], 'script_errors': event['script_errors'],
         'resource_groups': resource_summary(resources),
+        'request_timeline': request_timeline(resources),
         'slowest_resources': slowest_resources(resources),
         'trace_failed': event.get('trace_failed', False),
     }
@@ -361,7 +521,7 @@ def write_reports(out: Path, rows: list[dict], config: dict) -> dict:
         'config': config, 'summary': summary, 'runs': rows,
     }
     (out / 'results.json').write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
-    fields = [k for k in rows[0] if k not in ('resource_groups', 'slowest_resources')] if rows else []
+    fields = [k for k in rows[0] if k not in ('resource_groups', 'request_timeline', 'slowest_resources')] if rows else []
     with (out / 'runs.csv').open('w', newline='', encoding='utf-8') as fd:
         if rows:
             writer = csv.DictWriter(fd, fieldnames=fields)
@@ -379,6 +539,26 @@ def write_reports(out: Path, rows: list[dict], config: dict) -> dict:
         median = f"{stat['app_ready_median_ms']:.1f} ms" if stat['app_ready_median_ms'] is not None else 'n/a'
         p90 = f"{stat['app_ready_p90_ms']:.1f} ms" if stat['app_ready_p90_ms'] is not None else 'n/a'
         lines.append(f"| {view} | {cache} | {stat['app_ready_samples']}/{stat['samples']} | {median} | {p90} | {stat['error_count']} |")
+    lines.extend(['', '## First-player-status diagnostics', '',
+                  'Offsets include the np-only redirect, where applicable. Missing data is n/a.',
+                  'Retry = a 1000 ms timer scheduled from nowplaying-page.js during a player-status event;',
+                  'it indicates the fallback signature, **not** why the handler failed.', '',
+                  '| View | Cache | Deferred JS ready | First player status | First title status | Title visible | Retry runs | Status-before-JS runs |',
+                  '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |'])
+    def fmt(value):
+        return f'{value:.1f} ms' if value is not None else 'n/a'
+    for key, stat in summary.items():
+        view, cache = key.split('/')
+        lines.append(f'| {view} | {cache} | '
+                     f'{fmt(stat["deferred_function_ready_median_ms"])} | '
+                     f'{fmt(stat["first_status_median_ms"])} | '
+                     f'{fmt(stat["first_status_with_title_median_ms"])} | '
+                     f'{fmt(stat["track_visible_median_ms"])} | '
+                     f'{stat["retry_scheduled_runs"]}/{stat["samples"]} | '
+                     f'{stat["status_before_deferred_runs"]}/{stat["samples"]} |')
+    lines.extend(['', 'Cover candidate excludes Material Skin placeholder constants; it can still be a generic server image.',
+                  'Network request windows (in results.json) are relative to the **final** document, unlike total timings.',
+                  'Request durations overlap and are not additive.'])
     (out / 'summary.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return summary
 
@@ -390,7 +570,7 @@ def args_parser() -> argparse.ArgumentParser:
     parser.add_argument('--view', choices=('both', 'normal', 'np-only'), default='both')
     parser.add_argument('--runs', type=int, default=5, help='Cold+warm pairs per view (default 5)')
     parser.add_argument('--timeout-ms', type=int, default=30000, help='Per navigation/readiness timeout')
-    parser.add_argument('--observe-ms', type=int, default=2000, help='Extra observation after app becomes visible')
+    parser.add_argument('--observe-ms', type=int, default=3500, help='Extra observation after app becomes visible (default 3500 ms for player-status diagnosis)')
     parser.add_argument('--out', type=Path, help='Output directory; default: performance/results/<timestamp>')
     parser.add_argument('--headed', action='store_true', help='Show Chromium windows (closest to interactive use)')
     parser.add_argument('--chromium-path', help='Use a locally installed Chromium binary instead of Playwright-managed Chromium')

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmark import percentile, report_summary, resource_summary, server_origin, slowest_resources, view_url, write_reports
+from benchmark import percentile, report_summary, resource_summary, request_timeline, server_origin, slowest_resources, view_url, write_reports
 
 
 class BenchmarkUnitTests(unittest.TestCase):
@@ -36,6 +36,43 @@ class BenchmarkUnitTests(unittest.TestCase):
                      dict(pathClass='artwork', safeName='', duration=200, transferSize=100)]
         self.assertEqual(resource_summary(resources)['material-js']['count'], 1)
         self.assertEqual(slowest_resources(resources)[0]['asset'], 'artwork')
+
+    def test_startup_sequence_summary_and_retry_counts(self):
+        sample = [
+            dict(view='np-only', mode='cold', app_ready_total_ms=300,
+                 deferred_function_ready_total_ms=500,
+                 first_player_status_total_ms=200,
+                 first_status_with_title_total_ms=200,
+                 track_visible_total_ms=1350, retry_scheduled_count=1,
+                 status_before_deferred_count=1, first_status_had_deferred=False,
+                 error=None),
+            dict(view='np-only', mode='cold', app_ready_total_ms=310,
+                 deferred_function_ready_total_ms=510,
+                 first_player_status_total_ms=600,
+                 first_status_with_title_total_ms=600,
+                 track_visible_total_ms=680, retry_scheduled_count=0,
+                 status_before_deferred_count=0, first_status_had_deferred=True,
+                 error=None),
+        ]
+        s = report_summary(sample)['np-only/cold']
+        self.assertEqual(s['retry_scheduled_runs'], 1)
+        self.assertEqual(s['status_before_deferred_runs'], 1)
+        self.assertEqual(s['first_status_had_deferred_runs'], 1)
+        self.assertEqual(s['track_visible_median_ms'], 1015)
+
+    def test_request_timeline_has_only_safe_categories(self):
+        resources = [
+            dict(pathClass='lms-jsonrpc', safeName='', startTime=100, responseEnd=500),
+            dict(pathClass='lms-jsonrpc', safeName='', startTime=300, responseEnd=700),
+            dict(pathClass='material-js', safeName='/material/html/js/nowplaying-functions.js',
+                 startTime=250, responseEnd=650),
+        ]
+        r = request_timeline(resources)
+        self.assertEqual(r['lms-jsonrpc']['first_start_ms'], 100)
+        self.assertEqual(r['lms-jsonrpc']['first_finished_ms'], 500)
+        self.assertEqual(r['lms-jsonrpc']['last_finished_ms'], 700)
+        self.assertEqual(r['nowplaying-functions.js']['first_finished_ms'], 650)
+        self.assertNotIn('http', str(r))
 
     def test_reports_omit_private_configuration(self):
         run = dict(view='normal', mode='cold', app_ready_total_ms=100.0,
