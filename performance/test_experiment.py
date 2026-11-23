@@ -2,7 +2,8 @@
 import json
 import unittest
 from types import SimpleNamespace
-from experiment import make_early_html, fulfill_early_html, home_storage_script, scenarios, summarize
+from experiment import (make_early_html, fulfill_early_html, home_storage_script,
+                        scenarios, summarize, html_profile, format_html_profile, safe_script_basename)
 
 BASE_HTML = '''<html><body>
 <script src="html/js/nowplaying-page.js?r=1.5.6"></script>
@@ -13,6 +14,22 @@ BASE_HTML = '''<html><body>
 
 
 class ExperimentTests(unittest.TestCase):
+    def test_html_profile_handles_two_script_wrapper(self):
+        shell = '<html><head></head><body><script src="https://a/private.js?key=SECRET"></script>' \
+                '<script src="material.js"></script></body></html>'
+        self.assertEqual(html_profile(shell)['scripts'], 2)
+        result = format_html_profile('Direct', 'http://192.168.1.111:9000/material/?token=SECRET', 200, shell)
+        self.assertIn("files=['private.js', 'material.js']", result)
+        self.assertNotIn('192.168', result)
+        self.assertNotIn('SECRET', result)
+        self.assertNotIn('https://', result)
+
+    def test_html_profile_handles_template_and_sanitizes_bad_filename(self):
+        self.assertEqual(html_profile(BASE_HTML)['deferred_entry'], 1)
+        self.assertEqual(html_profile(BASE_HTML)['scripts'], 3)
+        self.assertEqual(safe_script_basename('https://host/s/path.js?secret=abc'), 'path.js')
+        self.assertEqual(safe_script_basename('https://host/s/bad%20name.js?key=xyz'), '[nonstandard]')
+
     def test_early_script_exactly_once_before_main(self):
         result = make_early_html(BASE_HTML)
         self.assertEqual(result.count('nowplaying-functions.js?r='), 1)

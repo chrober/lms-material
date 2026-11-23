@@ -16,6 +16,7 @@ import re
 import statistics
 import sys
 import time
+from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright, Error as PlaywrightError
 
@@ -58,6 +59,125 @@ SCRIPT_TAG = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 DEFERRED_ENTRY = re.compile(r'(["\'])nowplaying-functions\1', flags=re.IGNORECASE)
+
+
+# Diagnostic summaries intentionally contain no document text, URLs, query
+# strings, HTML attributes, cookies, or network payloads.
+SCRIPT_OPEN = re.compile(
+    r"<script\b[^>]*\bsrc\s*=\s*(['\"])([^'\"]+)\1",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def safe_script_basename(src: str) -> str:
+    """Return a bounded filename, never a host/path/query or a private token."""
+    name = urlsplit(src.replace('&amp;', '&')).path.rsplit('/', 1)[-1]
+    return name if re.fullmatch(r'[A-Za-z0-9._-]{1,72}', name) else '[nonstandard]'
+
+
+def safe_document_path(url: str) -> str:
+    """Only expose ordinary Material paths, never query strings or hosts."""
+    path = urlsplit(url).path
+    return path if re.fullmatch(r'/material/[A-Za-z0-9_./-]{0,80}', path) else '[other]'
+
+
+def html_profile(html: str) -> dict:
+    """Identify bootstrap style without exporting potentially private HTML."""
+    names = [safe_script_basename(m.group(2)) for m in SCRIPT_OPEN.finditer(html)]
+    return {
+        'scripts': len(names),
+        'script_files': names[:30],
+        'deferred_entry': len(DEFERRED_ENTRY.findall(html)),
+        'has_app_root': bool(re.search(r"<[^>]+\bid\s*=\s*['\"]app['\"]", html, re.I)),
+        'has_deferred_loader': 'addJsToDocument' in html,
+        'has_material_revision': 'LMS_MATERIAL_REVISION' in html,
+    }
+
+
+def format_html_profile(label: str, url: str, status: int | None, html: str) -> str:
+    info = html_profile(html)
+    return (f'{label}: path={safe_document_path(url)}, '
+            f'status={status if status is not None else "n/a"}, '
+            f'scripts={info["scripts"]}, files={info["script_files"]}, '
+            f'deferred-entry={info["deferred_entry"]}, '
+            f'app-root={info["has_app_root"]}, '
+            f'deferred-loader={info["has_deferred_loader"]}, '
+            f'revision-marker={info["has_material_revision"]}')
+
+
+async def inspect_installed_html(args) -> int:
+    """Inspect *actual* served document(s) using Chromium without rewrites.
+
+    A plain HTTP GET can return a wrapper/launcher before a JavaScript redirect.
+    Capture both the direct result and browser document responses to distinguish
+    that from a genuinely bundled/different Material Skin release.
+    """
+    origin = server_origin(args.base_url)
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=not args.headed, executable_path=args.chromium_path)
+        try:
+            context = await browser.new_context(service_workers='block')
+            try:
+                target = view_url(origin, 'normal', args.player)
+                direct = await context.request.get(target, timeout=args.timeout_ms)
+                print(format_html_profile('Direct HTTP response', direct.url,
+                                          direct.status, await direct.text()))
+                page = await context.new_page()
+                documents = []
+                js_assets = set()
+
+                def on_response(response):
+                    if response.request.resource_type == 'document':
+                        documents.append(response)
+
+                def on_request(request):
+                    if request.resource_type == 'script':
+                        js_assets.add(safe_script_basename(request.url))
+
+                page.on('response', on_response)
+                page.on('request', on_request)
+                try:
+                    await page.goto(target, wait_until='domcontentloaded',
+                                    timeout=args.timeout_ms)
+                    # Allow document redirects and deferred scripts to finish.
+                    try:
+                        await page.wait_for_selector('#app', state='attached',
+                                                     timeout=min(4000, args.timeout_ms))
+                    except PlaywrightError:
+                        pass
+                    await page.wait_for_timeout(1200)
+                    for index, response in enumerate(documents[:6], start=1):
+                        try:
+                            body = await response.text()
+                            print(format_html_profile(f'Browser document {index}',
+                                                      response.url, response.status, body))
+                        except PlaywrightError:
+                            print(f'Browser document {index}: body unavailable')
+                    print(format_html_profile('Final browser DOM', page.url,
+                                              None, await page.content()))
+                    print('Script requests (filenames only): '
+                          + str(sorted(js_assets)[:50]))
+                    try:
+                        state = await page.evaluate("""() => ({
+                          appPresent: !!document.querySelector('#app'),
+                          appVisible: !!document.querySelector('#app:not([v-cloak])'),
+                          nowplayingFunction: typeof window.nowplayingOnPlayerStatus === 'function',
+                          hasBus: typeof window.bus !== 'undefined'
+                        })""")
+                        print('Frontend markers: '+str(state))
+                    except PlaywrightError:
+                        print('Frontend markers: unavailable')
+                finally:
+                    await page.close()
+            finally:
+                await context.close()
+        finally:
+            await browser.close()
+    print('Diagnostic finished. No HTML, URLs, credentials, or personal media '
+          'data were saved. Share the printed diagnostic lines.')
+    return 0
+
 
 
 def html_shape(html: str) -> str:
@@ -378,6 +498,8 @@ async def run_experiment(args) -> int:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-url', required=True)
+    parser.add_argument('--inspect-html', action='store_true',
+                        help='Show sanitized script filenames for actual Material pages and redirects, then exit')
     parser.add_argument('--player', help='Player name/ID; otherwise first connected player')
     parser.add_argument('--mode', choices=['all','now-playing','home'], default='all')
     parser.add_argument('--runs', type=int, default=5)
@@ -388,6 +510,8 @@ def main():
     parser.add_argument('--out', type=Path)
     args = parser.parse_args()
     try:
+        if args.inspect_html:
+            return asyncio.run(inspect_installed_html(args))
         return asyncio.run(run_experiment(args))
     except ValueError as exc:
         print(f'Invalid input/experiment: {exc}', file=sys.stderr)

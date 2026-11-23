@@ -8,6 +8,22 @@ The prior ten `np-only` measurements showed that a cold page received `playerSta
 
 Material Skin's **Scrollable lists** in the main home view invoke `material-skin home-extra`, parse combined list data, then re-run the home grid layout. The second comparison measures the loading overhead of those rows. It does *not* assume this is the cause of a slow experience.
 
+## Diagnose the installed HTML layout
+
+If the Now Playing A/B preflight reports `Cannot identify the deferred Now Playing entry`, use the read-only HTML inspection before trying another rewrite:
+
+```powershell
+.\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --inspect-html
+```
+
+The command inspects the **initial HTTP document**, any JavaScript redirects in Chromium and the final DOM. It prints *sanitized JavaScript filenames* and generic frontend flags, never full URLs, HTTP response bodies, cookies, player IDs or track information. Share the printed lines to distinguish a redirect/launcher page from another Material Skin bootstrap layout. It does not change the server and does not write a report.
+
+You can already measure the normal home screen independently of the early-load experiment:
+
+```powershell
+.\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode home --runs 5 --headed
+```
+
 ## Windows 11: run both A/B comparisons
 
 From the root of your existing fork, after updating the experimental branch:
