@@ -1,0 +1,30 @@
+name: Prepare performance benchmark files (temporary)
+on:
+  push:
+    branches: ['perf/material-startup-benchmark']
+permissions:
+  contents: write
+jobs:
+  material-benchmark-prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Extract optional bundled benchmark source
+        shell: bash
+        run: |
+          if [[ ! -f performance-source.tar.gz ]]; then
+            echo "No bundle yet; initial workflow setup."
+            exit 0
+          fi
+          tar -tzf performance-source.tar.gz | grep -q '^performance/benchmark.py$'
+          tar -xzf performance-source.tar.gz
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add performance .gitignore
+          git rm performance-source.tar.gz .github/workflows/material-benchmark-prepare.yml
+          python -m py_compile performance/benchmark.py
+          python -m unittest discover -s performance -p 'test_*.py' -v
+          git commit -m 'test(perf): add standalone Material Skin startup benchmark'
+          git push origin HEAD:perf/material-startup-benchmark
