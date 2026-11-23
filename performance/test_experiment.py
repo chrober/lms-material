@@ -102,6 +102,51 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result['errors'], 0)
 
 
+    def test_packaged_release_moves_deferred_once_and_preserves_css(self):
+        # mkrel.py combines the individual source files in released builds.
+        html = (
+            '<html><head><script src="html/js/material.min.js?r=1.5.6"></script></head>'
+            '<body><script src="material/custom.js"></script>'
+            '<script type="text/javascript">function loadOtherFiles() {'
+            'var script = document.createElement("script");'
+            'script.src = "html/js/material-deferred.min.js?r=1.5.6";'
+            'document.body.appendChild(script);'
+            'var link = document.createElement("link");'
+            'link.href = "html/css/lib-deferred.min.css?r=1.5.6";'
+            'link.rel = "stylesheet"; document.body.appendChild(link);'
+            '} window.addEventListener("load", loadOtherFiles);'
+            '</script></body></html>')
+        result = make_early_html(html)
+        self.assertEqual(result.count('material-deferred.min.js'), 1)
+        self.assertLess(result.index('material.min.js'), result.index('material-deferred.min.js'))
+        self.assertLess(result.index('custom.js'), result.index('material-deferred.min.js'))
+        self.assertLess(result.index('material-deferred.min.js'), result.index('loadOtherFiles'))
+        self.assertIn('lib-deferred.min.css', result)
+        self.assertNotIn('document.body.appendChild(script)', result)
+        with self.assertRaises(ValueError):
+            make_early_html(result)  # Must never run bundle twice.
+
+    def test_packaged_loader_quotes_and_escaped_query(self):
+        html = ('<html><body><script src="./html/js/material.min.js?v=42"></script>'
+                '<script>function loadOtherFiles() {'
+                "var script=document.createElement('script');"
+                "script.src='html/js/material-deferred.min.js?v=42&amp;key=a';"
+                'document.body.appendChild(script); }</script></body></html>')
+        result = make_early_html(html)
+        self.assertIn('src="html/js/material-deferred.min.js?v=42&amp;key=a"', result)
+        self.assertNotIn('script.src=', result)
+
+    def test_packaged_unknown_loader_rejected(self):
+        html = ('<script src="html/js/material.min.js?r=1"></script>'
+                '<script>function loadOtherFiles(){'
+                'var script=document.createElement("script");'
+                'script.src="html/js/material-deferred.min.js?r=1";'
+                'document.head.appendChild(script);}</script>')
+        with self.assertRaisesRegex(ValueError, 'Unsupported packaged'):
+            make_early_html(html)
+
+
+
 class RouteSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_response_is_served_unmodified_without_raising(self):
         calls = []

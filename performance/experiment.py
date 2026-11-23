@@ -209,14 +209,56 @@ def _script_filename(src: str) -> str:
     return src.split('?', 1)[0].split('#', 1)[0].rsplit('/', 1)[-1].lower()
 
 
-def make_early_html(html: str) -> str:
-    """Move a deferred JS file to the synchronous bootstrap, without duplicating it.
 
-    The script's position is selected from the HTML actually served by LMS.
-    If no original page script tag is present, insert before main.js; if that
-    too is bundled, use </head> only when a deferred list is recognizable.
+# Packaged releases have a single deferred JS bundle, not the individual
+# nowplaying-functions.js file. Moving the WHOLE bundle is a separate A/B test.
+PACKAGED_DEFERRED_LOADER = re.compile(
+    r"""\bvar\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*document\.createElement\(\s*["']script["']\s*\)\s*;\s*"""
+    r"""(?P=var)\.src\s*=\s*(?P<quote>["'])(?P<src>[^"']*material-deferred\.min\.js[^"']*)(?P=quote)\s*;\s*"""
+    r"""document\.body\.appendChild\(\s*(?P=var)\s*\)\s*;""",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _promote_packaged_deferred(html: str, tags: list) -> str:
+    """Promote the ENTIRE production deferred bundle, without double execution."""
+    import html as html_lib
+    regular = [m for m in tags if _script_filename(m.group(2)) == 'material.min.js']
+    deferred = [m for m in tags if _script_filename(m.group(2)) == 'material-deferred.min.js']
+    loaders = list(PACKAGED_DEFERRED_LOADER.finditer(html))
+    if len(regular) != 1 or deferred or len(loaders) != 1:
+        raise ValueError('Unsupported packaged Material bundle layout: ' + html_shape(html))
+    src = html_lib.unescape(loaders[0].group('src'))
+    if src.startswith(('http:', 'https:', '//', '/')):
+        raise ValueError('Deferred bundle must use a relative same-origin path')
+    # Prefer inserting after startup and custom.js, just before loadOtherFiles;
+    # leave the original CSS deferred loader untouched.
+    loader_script = re.search(
+        r'<script\b[^>]*>\s*(?:/\*.*?\*/\s*)?function\s+loadOtherFiles\s*\(',
+        html, flags=re.IGNORECASE | re.DOTALL)
+    anchor = loader_script.start() if loader_script else regular[0].end()
+    tag = '\n  <script src="' + html_lib.escape(src, quote=True) + '"></script>\n'
+    patched = html[:anchor] + tag + html[anchor:]
+    matches = list(PACKAGED_DEFERRED_LOADER.finditer(patched))
+    if len(matches) != 1:
+        raise ValueError('Packaged loader changed unexpectedly')
+    patched = patched[:matches[0].start()] + patched[matches[0].end():]
+    if sum(_script_filename(m.group(2)) == 'material-deferred.min.js'
+           for m in SCRIPT_TAG.finditer(patched)) != 1:
+        raise ValueError('Packaged rewrite must include exactly one deferred script')
+    return patched
+
+
+
+def make_early_html(html: str) -> str:
+    """Promote deferred JS without duplication in the test browser only.
+
+    Unbundled source promotes only the Now Playing function; a packaged
+    release promotes the entire deferred bundle (a broader experiment).
     """
     tags = list(SCRIPT_TAG.finditer(html))
+    if any(_script_filename(m.group(2)) == 'material.min.js' for m in tags):
+        return _promote_packaged_deferred(html, tags)
     if any(_script_filename(m.group(2)) == 'nowplaying-functions.js' for m in tags):
         raise ValueError('Server already loads Now Playing functions early; no valid A/B comparison.')
     deferred = list(DEFERRED_ENTRY.finditer(html))
@@ -349,7 +391,9 @@ def write_reports(out: Path, rows: list[dict], config: dict):
     lines = ['# Material Skin A/B startup experiment', '',
              'Browser-side A/B test against the **same unchanged LMS server**.',
              'All values in ms (median of successful samples). Cold and warm are separate.',
-             'Early = serve nowplaying-functions.js before main.js in the benchmark browser only.',
+             'Early (source): move only the Now Playing function before main.js.',
+             'Early (release): move the entire deferred production bundle earlier.',
+             'These are different hypotheses; bundle timing does not isolate one function.',
              'Home ON = New Music, Random Releases, Playlists, Radios, Explore (grid view).',
              'Home OFF = no scrollable home lists (grid view).',
              'First-home-header measures first visible `.grid-header` DOM element and may be n/a.',
@@ -388,6 +432,7 @@ async def run_experiment(args) -> int:
             # Fail fast if the installed Material version does not expose the
             # expected deferred loader. This GET is read-only and its response
             # is checked only in memory. It does not affect test browser cache.
+            early_strategy = 'not used'
             if any(early for _, _, early, _ in cases):
                 validation = await pw.request.new_context()
                 try:
@@ -396,7 +441,15 @@ async def run_experiment(args) -> int:
                                                         timeout=args.timeout_ms)
                         if response.status >= 400:
                             raise ValueError(f'LMS returned HTTP {response.status} for the Material page')
-                        make_early_html(await response.text())
+                        baseline_html = await response.text()
+                        make_early_html(baseline_html)
+                        is_packaged = any(
+                            _script_filename(m.group(2)) == 'material.min.js'
+                            for m in SCRIPT_TAG.finditer(baseline_html))
+                        early_strategy = (
+                            'full deferred production bundle' if is_packaged
+                            else 'individual Now Playing source file')
+                        print('Validated early-load strategy: ' + early_strategy)
                     except (ValueError, PlaywrightError) as exc:
                         detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
                         print('Early-load HTML validation failed: ' + detail + '\n'
@@ -490,7 +543,8 @@ async def run_experiment(args) -> int:
         finally:
             await browser.close()
     summary = write_reports(out, rows, {'mode':args.mode, 'runs':args.runs,
-                                        'headed':args.headed,'observe_ms':args.observe_ms})
+                                        'headed':args.headed, 'observe_ms':args.observe_ms,
+                                        'early_strategy':early_strategy})
     print(f'Completed: {out.resolve()}')
     return 0 if rows and all(r['error'] is None for r in rows) else 1
 

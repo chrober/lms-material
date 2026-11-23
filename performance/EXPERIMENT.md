@@ -113,3 +113,37 @@ For a quick compatibility check before the full experiment, run `--runs 1`.
 The error message's counts (`nowplaying-page`, `main`, `deferred-entry`,
 `scripts`, `has-head`) are safe to share. Do not share raw HTML, HAR, or browser
 traces without redaction.
+
+
+## Installed release bundles (confirmed by HTML inspection)
+
+Your installed Lyrion/Material release serves the bundled scripts
+material.min.js and material-deferred.min.js. The release builder mkrel.py
+combines the individual JavaScript files; production HTML therefore differs
+from the unbundled source template.
+
+The np-early scenario now automatically chooses its browser-only experiment:
+
+- For unbundled source installations, it moves only nowplaying-functions.js
+  before the initial bootstrap.
+- For packaged releases, it loads the ENTIRE material-deferred.min.js bundle
+  earlier (after the main bundle and custom.js), and removes only its original
+  deferred JS insertion. The normal deferred CSS loader remains in place.
+
+The packaged comparison is deliberately broader than the single-function
+optimization. Moving the entire bundle might make startup slower or introduce
+script-ordering bugs, so check errors and app-ready as well as title-visible.
+
+The terminal and JSON report now identify the strategy as
+"full deferred production bundle" or "individual Now Playing source file".
+
+Run the focused smoke test first:
+
+    git pull --ff-only origin experiment/early-nowplaying-and-home-lists
+    .\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode now-playing --runs 1 --headed
+
+If the test succeeds without browser errors, rerun with --runs 5.
+The server and regular browser settings are never modified. Do not deploy
+this experiment to your Lyrion server. If the full-bundle variant helps,
+the next step is to rebuild a release that moves only the Now Playing
+function into the initial bundle and compare that separate candidate.
