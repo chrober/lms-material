@@ -174,7 +174,7 @@ async def run_experiment(args) -> int:
     rows = []
     cases = scenarios(args.mode)
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=not args.headed)
+        browser = await pw.chromium.launch(headless=not args.headed, executable_path=args.chromium_path)
         try:
             player = args.player
             if player is None:
@@ -280,6 +280,7 @@ def main():
     parser.add_argument('--mode', choices=['all','now-playing','home'], default='all')
     parser.add_argument('--runs', type=int, default=5)
     parser.add_argument('--headed', action='store_true')
+    parser.add_argument('--chromium-path', help='Optional locally installed Chromium executable')
     parser.add_argument('--timeout-ms', type=int, default=30000)
     parser.add_argument('--observe-ms', type=int, default=5000)
     parser.add_argument('--out', type=Path)
