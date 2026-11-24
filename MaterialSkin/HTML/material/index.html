@@ -256,9 +256,6 @@
   print("  <script src=\"html/js/splitter.js?r=$version\"></script>\n");
   print("  <script src=\"html/js/browse-page.js?r=$version\"></script>\n");
   print("  <script src=\"html/js/nowplaying-page.js?r=$version\"></script>\n");
-  # nowplayingOnPlayerStatus is required when the first playerStatus message arrives.
-  # Load it before Vue app bootstrap, rather than after window.load.
-  print("  <script src=\"html/js/nowplaying-functions.js?r=$version\"></script>\n");
   print("  <script src=\"html/js/progressbar.js?r=$version\"></script>\n");
   print("  <script src=\"html/js/queue-page.js?r=$version\"></script>\n");
   print("  <script src=\"html/js/screensaver.js?r=$version\"></script>\n");
@@ -302,7 +299,7 @@
      }
    }
    function loadOtherFiles() {
-     addJsToDocument("html/js/", ["browse-resp", "browse-functions", "prompt-dialog", "choice-dialog", "standarditems", "sync-dialog", "groupplayers-dialog", "ui-settings", "player-settings", "player-settings-plugin", "volume", "information", "randommix-dialog", "rating-dialog", "manage-players", "playerlist-dialog", "favorite-dialog", "sleep-dialog", "info-dialog", "iframe-dialog", "icon-dialog", "dstm-dialog", "savequeue-dialog", "addtoplaylist-dialog", "file-dialog", "groupvolume-dialog", "advancedsearch-dialog", "npshare-dialog", "gallery", "utils-deferred"],
+     addJsToDocument("html/js/", ["browse-resp", "browse-functions", "nowplaying-functions", "prompt-dialog", "choice-dialog", "standarditems", "sync-dialog", "groupplayers-dialog", "ui-settings", "player-settings", "player-settings-plugin", "volume", "information", "randommix-dialog", "rating-dialog", "manage-players", "playerlist-dialog", "favorite-dialog", "sleep-dialog", "info-dialog", "iframe-dialog", "icon-dialog", "dstm-dialog", "savequeue-dialog", "addtoplaylist-dialog", "file-dialog", "groupvolume-dialog", "advancedsearch-dialog", "npshare-dialog", "gallery", "utils-deferred"],
      [% PERL %]
      my $version=Plugins::MaterialSkin::Plugin->getPluginVersion();
      print("                \"$version\", )");

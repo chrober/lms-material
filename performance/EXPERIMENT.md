@@ -1,120 +1,118 @@
-# Material Skin startup A/B experiments
+# Material Skin: startup A/B benchmark
 
-A repeatable Playwright benchmark against the user's **unchanged** local Lyrion Music Server. All changes are applied only to isolated test-browser contexts; no plugin installation, server changes, browser profile changes, or playback actions are required.
+This is a read-only local Playwright benchmark against the user's **unchanged**
+Lyrion Music Server. It does not deploy plugin changes or affect normal browser
+settings. The experiment compares a single deferred-loader registration change
+and two normal-home list configurations.
 
-## Windows setup
+## Windows PowerShell
 
-From the checkout of `chrober/lms-material`:
+Run from your existing checked-out fork:
 
 ```powershell
-git fetch origin
-git switch experiment/early-nowplaying-and-home-lists
 git pull --ff-only origin experiment/early-nowplaying-and-home-lists
 
-# Only if not previously installed:
-.\performance\.venv\Scripts\python.exe -m pip install -r performance\requirements.txt
-.\performance\.venv\Scripts\python.exe -m playwright install chromium
+# One cold and one warm start per Now Playing variant:
+.\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode now-playing --runs 1 --headed --timeout-ms 12000
 ```
 
-## Experiments
-
-### Now Playing: DOMContentLoaded vs window.load
-
-The browser-only variant **np-early** replaces a single event name in the served HTML:
-
-```javascript
-window.addEventListener("load", loadOtherFiles, false);
-```
-
-becomes
-
-```javascript
-window.addEventListener("DOMContentLoaded", loadOtherFiles, false);
-```
-
-No JavaScript source file, bundle, URL, loading order, or actual loader is changed. `loadOtherFiles()` continues to load the deferred JS and CSS in precisely the same way, but is triggered as soon as the HTML finishes parsing rather than waiting for all assets. Both unbundled checkout HTML and compiled release HTML use this loader registration.
-
-This supersedes the previous experimental attempt to **synchronously** inject the entire `material-deferred.min.js` into the HTML. That attempt was invalid: in the first real LMS test it prevented the application from initializing (timeouts, one JavaScript error, 17 failed resources). **Do not deploy the previous code.** The current A/B variant tests a smaller event-timing change, not a synchronous bundle move.
-
-One smoke run:
-
-```powershell
-.\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode now-playing --runs 1 --headed
-```
-
-The console should report `Validated early-load strategy: DOMContentLoaded deferred loader (packaged)` for the installed production release.
-
-If **both** `np-original` and `np-early` initialize and display a title (app and title must be numbers, not `None`), run ten alternating pairs:
+Only if both `np-original` and `np-early` show numeric `app` and `title`
+values, and the visible UI is correct, proceed with more runs:
 
 ```powershell
 .\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode now-playing --runs 10 --headed
 ```
 
-Compare app-ready, deferred-function-ready, first player status, title-visible, 1000-ms retry counts, FCP/LCP, failed requests and script errors. The intended success condition is earlier title visibility **without** regressions in correctness or initial app readiness. The benchmark cannot itself certify full UI correctness; inspect the headed browser if anything looks wrong.
+The report is written under `performance/results/<timestamp>-experiment/` as
+`experiment-summary.md`, `experiment-runs.csv`, and `experiment-results.json`.
 
-### Normal home screen: scrollable lists on/off
+## How the early variant now works (no HTTP interception)
+
+Previous browser-only approaches used `route.fetch()/route.fulfill()` to
+rewrite Material's HTML. A real-LMS diagnostic isolated a defect in that
+method: even when the **original, unmodified HTML** was fulfilled, Vue never
+initialized and 17 requests failed. In contrast both the baseline browser
+load and `route.continue()` succeeded. Hence results from those failed
+variants do **not** measure a performance effect of the intended optimization.
+
+The current `np-early` variant uses a Playwright **init script** in an
+isolated browser context. Before the page's own scripts execute, the init
+script intercepts only the registration
+
+```javascript
+window.addEventListener('load', loadOtherFiles, false)
+```
+
+and registers that existing, unchanged function for `DOMContentLoaded`
+instead. Every other event listener is forwarded unchanged. **The HTML,
+JavaScript bundles and CSS responses are served directly by Chromium,
+without any Playwright request routing or interception.** No bundle is
+executed synchronously during HTML parsing. The installed plugin remains
+unmodified.
+
+The benchmark prints `Early-load strategy: init-script window.addEventListener
+hook (no HTTP interception)`. Its new result fields are:
+
+- `early_hook_registered`: number of loader registrations matched (expected 1)
+- `early_hook_fired`: number of early loader invocations (expected 1)
+- `early_loader_fired_ms`: start-relative timestamp of the changed loader
+  invocation
+
+A missing or duplicated hook is a benchmark error. Independently check
+JavaScript errors, HTTP failures, app-ready, title visibility, retry counts,
+FCP and LCP. Numeric values alone do not certify correctness; visually check
+the UI during the one-run smoke test. Stop rather than repeat broken runs.
+
+A Chromium fixture validates that only the Material loader is redirected,
+that its callback fires once, and that unrelated `window.load` listeners
+still fire on the original event. Python unit tests and the GitHub CI workflow
+validate the regression properties. A successful test on the real user's LAN
+server is still required before claiming any speedup.
+
+## Normal home screen with and without scrollable lists
 
 ```powershell
 .\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode home --runs 5 --headed
 ```
 
-The independent `home-scrollable-on` test enables New Music, Random Releases, Playlists, Radios and Explore; `home-scrollable-off` disables those lists. Both force the home grid view only inside the benchmark browser.
+In isolated test-browser storage, the ON variant enables New Music, Random
+Releases, Playlists, Radios and Explore; the OFF variant disables them.
 
-The user's initial measurements (five cold and five warm runs per setting) showed:
+Earlier measurements from five cold/warm pairs found:
 
-| Median | Lists OFF | Lists ON |
+| Metric (median) | Lists off | Lists on |
 | --- | ---: | ---: |
-| Cold app-ready | 463 ms | 395 ms |
-| Warm app-ready | 232 ms | 226 ms |
+| Cold app ready | 463 ms | 395 ms |
+| Warm app ready | 232 ms | 226 ms |
 | Cold LCP | 516 ms | 1540 ms |
 | Warm LCP | 468 ms | 1304 ms |
 | Cold request count | 91 | 149 |
-| First visible home header, cold | n/a | 1651 ms |
-| First visible home header, warm | n/a | 883 ms |
+| First home header, cold | n/a | 1651 ms |
+| First home header, warm | n/a | 883 ms |
 | Home-extra completed, cold | n/a | 851 ms |
 | Home-extra completed, warm | n/a | 886 ms |
 
-The home requests and rendering add substantial work, but *app-ready is not the same as a fully populated home screen*. Request durations overlap; do not sum them. The early Now Playing race may also occur when the normal UI is used.
+The home-extra response timing and first visible header represent separate
+events. Response latency and parallel resource durations cannot be added.
+The main Vue app-ready marker is not the same as the time until home content
+has finished rendering.
 
-## Files and privacy
+## Debugging and privacy
 
-A timestamped directory under `performance/results/` contains:
-- `experiment-summary.md` — scenario medians and error counts
-- `experiment-runs.csv` — per-run measurements
-- `experiment-results.json` — detailed sanitized timings/resource categories
+The existing `--inspect-html` option identifies installed release assets.
+The diagnostic `performance/diagnose_interceptor.py` records only categorized
+errors and safely demonstrates the prior interception failure. It is **not**
+part of the revised A/B execution.
 
-Share these three files for analysis. Server addresses, track names, player identifiers, request payloads, cookies, HARs and screenshots are not written by default. The `--inspect-html` option prints sanitized script filenames and response structure without exporting the HTML. Both the UI experiments and the inspection should be run **only against a trusted local server**.
+Default results do not export server IPs, player IDs, song names, playlist
+names, cookies, response bodies, HAR archives or screenshots. Each cold run
+uses a fresh isolated Chromium context; its paired warm navigation reuses
+that context. Server state and normal browser profiles are untouched.
+Only run these tests against a trusted local server.
 
-The performance measurements use a dedicated Chromium context for each cold run and a repeated navigation within that same context for a warm run. The test rotates the scenario order to reduce systematic bias.
+Installed releases use `material.min.js` and
+`material-deferred.min.js`, constructed by the upstream `mkrel.py`.
+**Do not merge or deploy a production plugin change until the A/B result and
+functionality have been verified.**
 
-## Development and status
-
-- Source repository: https://github.com/chrober/lms-material
-- Pull request: https://github.com/chrober/lms-material/pull/2 (draft until LAN validation)
-- The root `mkrel.py` packages source files into `material.min.js` and `material-deferred.min.js`; do not expect individual JS script tags in an installed release.
-- The experimental source-file change in `MaterialSkin/HTML/material/index.html` is a **separate proof of concept** and is not required or installed for the browser-only benchmark.
-- Do **not** merge or deploy the experimental plugin code without controlled A/B measurements and functional verification.
-
-## Diagnosing an unresponsive browser-only A/B variant
-
-If np-early displays raw Vue template markers such as {{ snackbar.msg }},
-do NOT run additional performance pairs. This means application initialization
-did not complete, so there is no valid performance comparison.
-
-Run the isolated interception diagnostic once to distinguish Playwright HTML
-routing problems from problems with the modified loader timing:
-
-    .\performance\.venv\Scripts\python.exe performance\diagnose_interceptor.py --base-url "http://YOUR-LMS-SERVER:9000" --headed
-
-It checks five independent cases with fresh browser contexts:
-baseline (no route); continue (route passthrough); fulfill-original
-(response re-served unchanged); fulfill-text (same HTML text re-served);
-modified (the DOMContentLoaded experiment).
-
-The diagnostic prints only aggregated response/failure categories, app-ready
-booleans, and redacted JavaScript error categories. It does not save HTML,
-URLs, credentials, cookies or track metadata. The installed LMS remains
-unchanged. A result showing that fulfill-original fails while continue
-succeeds would implicate the interception/response forwarding mechanism.
-If only modified fails, investigate the rewritten event timing instead.
-
+PR: https://github.com/chrober/lms-material/pull/2
