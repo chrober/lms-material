@@ -210,93 +210,36 @@ def _script_filename(src: str) -> str:
 
 
 
-# Packaged releases have a single deferred JS bundle, not the individual
-# nowplaying-functions.js file. Moving the WHOLE bundle is a separate A/B test.
-PACKAGED_DEFERRED_LOADER = re.compile(
-    r"""\bvar\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*document\.createElement\(\s*["']script["']\s*\)\s*;\s*"""
-    r"""(?P=var)\.src\s*=\s*(?P<quote>["'])(?P<src>[^"']*material-deferred\.min\.js[^"']*)(?P=quote)\s*;\s*"""
-    r"""document\.body\.appendChild\(\s*(?P=var)\s*\)\s*;""",
-    flags=re.IGNORECASE | re.DOTALL,
+# Hook the existing loader earlier, AFTER the HTML has been parsed. This
+# avoids executing the production deferred bundle during document parsing.
+# Both the source and the packaged release register the same event listener.
+DEFERRED_LOAD_EVENT = re.compile(
+    r'''(?P<before>\bwindow\s*\.\s*addEventListener\s*\(\s*)(?P<quote>["'])load(?P=quote)(?P<after>\s*,\s*loadOtherFiles\b)''',
+    flags=re.IGNORECASE,
 )
 
 
-def _promote_packaged_deferred(html: str, tags: list) -> str:
-    """Promote the ENTIRE production deferred bundle, without double execution."""
-    import html as html_lib
-    regular = [m for m in tags if _script_filename(m.group(2)) == 'material.min.js']
-    deferred = [m for m in tags if _script_filename(m.group(2)) == 'material-deferred.min.js']
-    loaders = list(PACKAGED_DEFERRED_LOADER.finditer(html))
-    if len(regular) != 1 or deferred or len(loaders) != 1:
-        raise ValueError('Unsupported packaged Material bundle layout: ' + html_shape(html))
-    src = html_lib.unescape(loaders[0].group('src'))
-    if src.startswith(('http:', 'https:', '//', '/')):
-        raise ValueError('Deferred bundle must use a relative same-origin path')
-    # Prefer inserting after startup and custom.js, just before loadOtherFiles;
-    # leave the original CSS deferred loader untouched.
-    loader_script = re.search(
-        r'<script\b[^>]*>\s*(?:/\*.*?\*/\s*)?function\s+loadOtherFiles\s*\(',
-        html, flags=re.IGNORECASE | re.DOTALL)
-    anchor = loader_script.start() if loader_script else regular[0].end()
-    tag = '\n  <script src="' + html_lib.escape(src, quote=True) + '"></script>\n'
-    patched = html[:anchor] + tag + html[anchor:]
-    matches = list(PACKAGED_DEFERRED_LOADER.finditer(patched))
-    if len(matches) != 1:
-        raise ValueError('Packaged loader changed unexpectedly')
-    patched = patched[:matches[0].start()] + patched[matches[0].end():]
-    if sum(_script_filename(m.group(2)) == 'material-deferred.min.js'
-           for m in SCRIPT_TAG.finditer(patched)) != 1:
-        raise ValueError('Packaged rewrite must include exactly one deferred script')
-    return patched
-
-
-
 def make_early_html(html: str) -> str:
-    """Promote deferred JS without duplication in the test browser only.
+    """Schedule Material's UNCHANGED deferred loader at DOMContentLoaded.
 
-    Unbundled source promotes only the Now Playing function; a packaged
-    release promotes the entire deferred bundle (a broader experiment).
+    The production code waits for window.load, which can be delayed by artwork
+    and other page assets. No scripts are moved or duplicated. Unlike promoting
+    material-deferred.min.js synchronously, this preserves parse-time ordering.
     """
-    tags = list(SCRIPT_TAG.finditer(html))
-    if any(_script_filename(m.group(2)) == 'material.min.js' for m in tags):
-        return _promote_packaged_deferred(html, tags)
-    if any(_script_filename(m.group(2)) == 'nowplaying-functions.js' for m in tags):
-        raise ValueError('Server already loads Now Playing functions early; no valid A/B comparison.')
-    deferred = list(DEFERRED_ENTRY.finditer(html))
-    if len(deferred) != 1:
-        raise ValueError(f'Cannot identify the deferred Now Playing entry; {html_shape(html)}')
-
-    page = [m for m in tags if _script_filename(m.group(2)) == 'nowplaying-page.js']
-    mains = [m for m in tags if _script_filename(m.group(2)) == 'main.js']
-    if len(page) > 1 or len(mains) > 1:
-        raise ValueError(f'Ambiguous bootstrap scripts; {html_shape(html)}')
-    anchor = page[0] if page else (mains[0] if mains else None)
-    if anchor:
-        src = anchor.group(2)
-        src = re.sub(r'(?:nowplaying-page|main)\.js(?=\?|#|$)', 'nowplaying-functions.js', src, flags=re.I)
-        insert_at = anchor.end() if page else anchor.start()
-    else:
-        # Some Material releases bundle bootstrap JavaScript. A head insert is
-        # safe when the app clearly has its deferred loader, but it is more
-        # render-blocking; the A/B measurements must decide whether it helps.
-        head_end = re.search(r'</head\s*>', html, flags=re.I)
-        if not head_end or 'addJsToDocument' not in html:
-            raise ValueError(f'Cannot find a safe early-script insertion point; {html_shape(html)}')
-        insert_at = head_end.start()
-        version = re.search(r'LMS_MATERIAL_REVISION\s*=\s*["\']([^"\']+)', html)
-        src = 'html/js/nowplaying-functions.js'
-        if version:
-            from urllib.parse import quote
-            src += '?r=' + quote(version.group(1), safe='')
-
-    import html as html_lib
-    new_tag = '\n  <script src="' + html_lib.escape(html_lib.unescape(src), quote=True) + '"></script>'
-    result = html[:insert_at] + new_tag + html[insert_at:]
-    result = _remove_deferred_entry(result)
-    updated_tags = [m for m in SCRIPT_TAG.finditer(result)
-                    if _script_filename(m.group(2)) == 'nowplaying-functions.js']
-    if len(updated_tags) != 1 or DEFERRED_ENTRY.search(result):
-        raise ValueError(f'Experimental rewrite did not yield one early script; {html_shape(result)}')
+    if not re.search(r'\bfunction\s+loadOtherFiles\s*\(', html):
+        raise ValueError('Cannot identify the deferred Material loader: ' + html_shape(html))
+    matches = list(DEFERRED_LOAD_EVENT.finditer(html))
+    if len(matches) != 1:
+        raise ValueError('Expected one window.load deferred-loader registration, found '
+                         + str(len(matches)) + '; ' + html_shape(html))
+    result = DEFERRED_LOAD_EVENT.sub(
+        lambda match: match.group('before') + match.group('quote') + 'DOMContentLoaded'
+                      + match.group('quote') + match.group('after'),
+        html, count=1)
+    if result == html or len(DEFERRED_LOAD_EVENT.findall(result)) != 0:
+        raise ValueError('Deferred-loader event rewrite was not applied exactly once')
     return result
+
 
 
 async def fulfill_early_html(route, rewrite_count: list[int], rewrite_errors: list[str]) -> None:
@@ -391,9 +334,7 @@ def write_reports(out: Path, rows: list[dict], config: dict):
     lines = ['# Material Skin A/B startup experiment', '',
              'Browser-side A/B test against the **same unchanged LMS server**.',
              'All values in ms (median of successful samples). Cold and warm are separate.',
-             'Early (source): move only the Now Playing function before main.js.',
-             'Early (release): move the entire deferred production bundle earlier.',
-             'These are different hypotheses; bundle timing does not isolate one function.',
+             'Early: run the UNCHANGED deferred loader on DOMContentLoaded instead of window.load.',
              'Home ON = New Music, Random Releases, Playlists, Radios, Explore (grid view).',
              'Home OFF = no scrollable home lists (grid view).',
              'First-home-header measures first visible `.grid-header` DOM element and may be n/a.',
@@ -446,9 +387,9 @@ async def run_experiment(args) -> int:
                         is_packaged = any(
                             _script_filename(m.group(2)) == 'material.min.js'
                             for m in SCRIPT_TAG.finditer(baseline_html))
-                        early_strategy = (
-                            'full deferred production bundle' if is_packaged
-                            else 'individual Now Playing source file')
+                        early_strategy = ('DOMContentLoaded deferred loader (packaged)'
+                                          if is_packaged
+                                          else 'DOMContentLoaded deferred loader (unbundled)')
                         print('Validated early-load strategy: ' + early_strategy)
                     except (ValueError, PlaywrightError) as exc:
                         detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
