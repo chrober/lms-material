@@ -1,0 +1,92 @@
+name: Now Playing early-status regression and test package
+
+on:
+  pull_request:
+    paths:
+      - "MaterialSkin/HTML/material/html/js/nowplaying-page.js"
+      - "tests/nowplaying-early-status.test.js"
+      - ".github/workflows/np-early-status.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test JavaScript behavior
+        run: node --test tests/*.test.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install package dependencies
+        run: python -m pip install requests playwright
+      - name: Install browser runtime
+        run: python -m playwright install --with-deps chromium
+      - name: Verify actual Chromium captures deferred script load
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          SCRIPT = 'https://material-fixture.invalid/material-deferred.min.js?r=test'
+          HTML = """<!doctype html><body><script>
+          window.deferredWasReady = false;
+          document.addEventListener('load', function(event) {
+            const t=event.target;
+            if (t && t.tagName==='SCRIPT' &&
+                /\\/(?:material-deferred\\.min|nowplaying-functions)\\.js(?:[?#]|$)/.test(t.src||'')) {
+              window.deferredWasReady = typeof window.nowplayingOnPlayerStatus==='function';
+            }
+          }, true);
+          const script=document.createElement('script');
+          script.src='https://material-fixture.invalid/material-deferred.min.js?r=test';
+          document.body.appendChild(script);
+          </script></body>"""
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(headless=True)
+              try:
+                  page = browser.new_page()
+                  page.route(SCRIPT, lambda route: route.fulfill(
+                      status=200, content_type='application/javascript',
+                      body='window.nowplayingOnPlayerStatus = function() {};'))
+                  page.goto('about:blank')
+                  page.set_content(HTML, wait_until='load')
+                  page.wait_for_function('window.deferredWasReady', timeout=5000)
+                  print('Confirmed capture-phase script load fires after JS execution')
+              finally:
+                  browser.close()
+          PY
+      - name: Build an isolated plugin package
+        run: python mkrel.py test
+      - name: Check compiled release bundle
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          archive_file = Path('lms-material-test.zip')
+          assert archive_file.is_file()
+          with ZipFile(archive_file) as archive:
+              names = [n for n in archive.namelist()
+                       if n.endswith('html/js/material.min.js')]
+              assert len(names)==1, names
+              js = archive.read(names[0])
+              assert b'material-deferred' in js
+              assert b'playerStatus' in js
+              assert b'msk--np-only' in js, 'Prior NP-only home-list fix missing'
+              print('Compiled bundle contains early-status listener')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lms-material-early-status-test
+          path: lms-material-test.zip
+          retention-days: 7
