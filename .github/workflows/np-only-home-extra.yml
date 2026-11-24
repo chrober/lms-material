@@ -1,0 +1,55 @@
+name: NP-only home-list regression and test package
+
+on:
+  pull_request:
+    paths:
+      - "MaterialSkin/HTML/material/html/js/browse-page.js"
+      - "tests/np-only-home-extra.test.js"
+      - ".github/workflows/np-only-home-extra.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test JavaScript behavior
+        run: node --test tests/*.test.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install release packaging dependency
+        run: python -m pip install requests
+      - name: Build an isolated test package
+        run: python mkrel.py test
+      - name: Verify generated production bundle contains NP-only guard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          zip_path = Path('lms-material-test.zip')
+          assert zip_path.exists(), 'Expected test package'
+          with ZipFile(zip_path) as archive:
+              filenames = [n for n in archive.namelist()
+                           if n.endswith('html/js/material.min.js')]
+              assert len(filenames) == 1, filenames
+              bundled_js = archive.read(filenames[0])
+              assert b'msk--np-only' in bundled_js, 'NP-only guard missing from minified bundle'
+              print('Test archive and bundled NP-only guard verified')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lms-material-np-only-test-package
+          path: lms-material-test.zip
+          retention-days: 7
