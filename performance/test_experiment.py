@@ -123,6 +123,13 @@ class ExperimentTests(unittest.TestCase):
         self.assertIn(json.dumps(json.dumps(enabled[3])), script)
         self.assertEqual(len(scenarios('all')), 4)
         self.assertEqual(len(scenarios('now-playing')), 2)
+        hidden_on, hidden_off = scenarios('np-home')
+        self.assertEqual(hidden_on, ('np-home-on', 'np-only', False, [
+            'std_new', 'std_random', 'std_playlists', 'std_radios', 'std_explore']))
+        self.assertEqual(hidden_off, ('np-home-off', 'np-only', False, []))
+        self.assertFalse(hidden_on[2])
+        self.assertFalse(hidden_off[2])
+        self.assertEqual(len(scenarios('np-home')), 2)
 
     def test_summary_medians(self):
         rows = [

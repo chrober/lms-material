@@ -289,6 +289,14 @@ def scenarios(mode: str) -> list[tuple[str, str, bool, list[str]]]:
             ('home-scrollable-on', 'normal', False, HOME_ITEMS),
             ('home-scrollable-off', 'normal', False, []),
         ])
+    if mode == 'np-home':
+        # Same np-only frontend, unchanged JS loader: isolate only hidden
+        # start-screen list work. The localStorage setting belongs to this
+        # disposable Chromium context, never the user's real browser.
+        result.extend([
+            ('np-home-on', 'np-only', False, HOME_ITEMS),
+            ('np-home-off', 'np-only', False, []),
+        ])
     return result
 
 
@@ -492,7 +500,7 @@ def main():
     parser.add_argument('--inspect-html', action='store_true',
                         help='Show sanitized script filenames for actual Material pages and redirects, then exit')
     parser.add_argument('--player', help='Player name/ID; otherwise first connected player')
-    parser.add_argument('--mode', choices=['all','now-playing','home'], default='all')
+    parser.add_argument('--mode', choices=['all','now-playing','home','np-home'], default='all')
     parser.add_argument('--runs', type=int, default=5)
     parser.add_argument('--headed', action='store_true')
     parser.add_argument('--chromium-path', help='Optional local Chromium executable')

@@ -116,3 +116,37 @@ Installed releases use `material.min.js` and
 functionality have been verified.**
 
 PR: https://github.com/chrober/lms-material/pull/2
+
+## Now Playing without hidden home-screen lists
+
+The full Material frontend still initializes its Browse component when the
+`/material/np-only` view hides the home screen. The Browse component's
+`getHomeExtra()` can issue several JSON-RPC requests for scrollable home lists
+and subsequently render album art and grid rows that are not needed for an
+always-on Now Playing display.
+
+The independent `--mode np-home` A/B test keeps the **original** JavaScript
+loader and the same player, and changes only the five scrollable-list
+preferences within isolated browser localStorage:
+
+- `np-home-on`: New Music, Random Releases, Playlists, Radios, Explore.
+- `np-home-off`: an empty scrollable home-list selection.
+
+Nothing is changed on the actual LMS or in your normal browser settings.
+
+```powershell
+.\performance\.venv\Scripts\python.exe performance\experiment.py --base-url "http://YOUR-LMS-SERVER:9000" --mode np-home --runs 5 --headed
+```
+
+Verify that both scenarios have a functional Now Playing screen and
+numeric app/title values. Check `home_extra_count` in the JSON output:
+the OFF scenario should have zero home-extra requests. Then compare
+cold/warm title visibility, deferred handler readiness, app-ready,
+LCP and request counts. If removing the hidden lists materially helps,
+the correct production optimization is to avoid `getHomeExtra()` on
+the dedicated Now Playing route, without removing the home feature from
+the normal Material interface.
+
+This test is separate from `np-early` and is not automatically included
+in the default `--mode all` group, so the existing A/B protocol remains
+unchanged.
