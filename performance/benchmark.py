@@ -96,19 +96,15 @@ PROBE_SCRIPT = r"""(() => {
     values.busHookReady = performance.now();
   }
 
-  // The upstream catch block in nowplaying-page.js schedules a 1000 ms retry.
-  // Observe the scheduling during a playerStatus emission without changing the
-  // callback, arguments or delay. The caller check avoids the unrelated 1000 ms
-  // layout timer elsewhere in the component. This is a retry *signature*, not
-  // evidence of why an exception was thrown.
+  // Count 1000 ms timers scheduled synchronously during a playerStatus
+  // dispatch. The upstream catch block is one known source. Do not filter on
+  // Error().stack: browser stacks are not guaranteed to preserve JS filenames.
+  // This is a retry *signature*, not proof which handler scheduled the timer.
   const nativeSetTimeout = window.setTimeout;
   window.setTimeout = function(callback, delay) {
     if (statusDispatchDepth && Number(delay) === 1000) {
-      const stack = (new Error()).stack || '';
-      if (stack.includes('nowplaying-page.js')) {
-        values.retryScheduledCount++;
-        if (values.firstRetryScheduled === null) values.firstRetryScheduled = performance.now();
-      }
+      values.retryScheduledCount++;
+      if (values.firstRetryScheduled === null) values.firstRetryScheduled = performance.now();
     }
     return nativeSetTimeout.apply(this, arguments);
   };
