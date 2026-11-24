@@ -1,0 +1,25 @@
+name: Performance benchmark regression tests
+
+on:
+  pull_request:
+    paths:
+      - "performance/**"
+      - ".github/workflows/performance-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r performance/requirements.txt
+      - name: Run regression tests
+        run: python -m unittest discover -s performance -p "test_*.py" -v
