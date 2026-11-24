@@ -94,3 +94,27 @@ The performance measurements use a dedicated Chromium context for each cold run 
 - The root `mkrel.py` packages source files into `material.min.js` and `material-deferred.min.js`; do not expect individual JS script tags in an installed release.
 - The experimental source-file change in `MaterialSkin/HTML/material/index.html` is a **separate proof of concept** and is not required or installed for the browser-only benchmark.
 - Do **not** merge or deploy the experimental plugin code without controlled A/B measurements and functional verification.
+
+## Diagnosing an unresponsive browser-only A/B variant
+
+If np-early displays raw Vue template markers such as {{ snackbar.msg }},
+do NOT run additional performance pairs. This means application initialization
+did not complete, so there is no valid performance comparison.
+
+Run the isolated interception diagnostic once to distinguish Playwright HTML
+routing problems from problems with the modified loader timing:
+
+    .\performance\.venv\Scripts\python.exe performance\diagnose_interceptor.py --base-url "http://YOUR-LMS-SERVER:9000" --headed
+
+It checks five independent cases with fresh browser contexts:
+baseline (no route); continue (route passthrough); fulfill-original
+(response re-served unchanged); fulfill-text (same HTML text re-served);
+modified (the DOMContentLoaded experiment).
+
+The diagnostic prints only aggregated response/failure categories, app-ready
+booleans, and redacted JavaScript error categories. It does not save HTML,
+URLs, credentials, cookies or track metadata. The installed LMS remains
+unchanged. A result showing that fulfill-original fails while continue
+succeeds would implicate the interception/response forwarding mechanism.
+If only modified fails, investigate the rewritten event timing instead.
+
