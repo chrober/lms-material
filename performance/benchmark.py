@@ -66,7 +66,11 @@ PROBE_SCRIPT = r"""(() => {
     return typeof value === 'string'
       ? value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase() : '';
   }
-  const npOnly = new URLSearchParams(location.search).has('msk--np-only');
+  // /np-only redirects to /material/?...&css=msk--np-only&js=msk--np-only.
+  // The marker is a parameter value, not a parameter name.
+  const query = new URLSearchParams(location.search);
+  const npOnly = query.get('css') === 'msk--np-only' ||
+                 query.get('js') === 'msk--np-only';
   function attachBus() {
     const bus = window.bus;
     if (!bus || typeof bus.$emit !== 'function' || values.busHookReady !== null) return;
