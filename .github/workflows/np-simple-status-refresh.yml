@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -37,7 +37,7 @@ jobs:
         run: python mkrel.py test
       - name: Build matched upstream baseline
         run: |
-          git worktree add --detach "$RUNNER_TEMP/lms-material-baseline" HEAD^
+          git worktree add --detach "$RUNNER_TEMP/lms-material-baseline" c6db11c167c00c5b7a50ed0cabc42e7f99050deb
           (cd "$RUNNER_TEMP/lms-material-baseline" && python mkrel.py test)
           cp "$RUNNER_TEMP/lms-material-baseline/lms-material-test.zip" lms-material-baseline.zip
       - name: Verify packaged frontend
