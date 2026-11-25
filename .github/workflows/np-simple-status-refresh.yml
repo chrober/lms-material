@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -33,6 +35,11 @@ jobs:
         run: python -m pip install requests
       - name: Build test plugin
         run: python mkrel.py test
+      - name: Build matched upstream baseline
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/lms-material-baseline" HEAD^
+          (cd "$RUNNER_TEMP/lms-material-baseline" && python mkrel.py test)
+          cp "$RUNNER_TEMP/lms-material-baseline/lms-material-test.zip" lms-material-baseline.zip
       - name: Verify packaged frontend
         run: |
           python - <<'PY'
@@ -49,5 +56,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: lms-material-simple-status-refresh-test
-          path: lms-material-test.zip
+          path: |
+            lms-material-test.zip
+            lms-material-baseline.zip
           retention-days: 14
