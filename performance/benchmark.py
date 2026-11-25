@@ -26,7 +26,7 @@ except ImportError:
 
 PROBE_SCRIPT = r"""(() => {
   const values = {
-    appReady: null, npVisible: null, trackVisible: null,
+    appReady: null, npVisible: null, trackVisible: null, artistVisible: null,
     coverVisible: null, artworkCandidateVisible: null,
     deferredFunctionReady: null, busHookReady: null,
     firstPlayerStatus: null, firstStatusWithTitle: null,
@@ -59,6 +59,14 @@ PROBE_SCRIPT = r"""(() => {
   // Observe existing Material events without reading/saving any status payload.
   // In particular no player ID, title, URL, authentication or playlist data is exported.
   let statusDispatchDepth = 0;
+  // Only retain artist names in this document's private closure for matching
+  // actual rendered metadata. No names are included in the exported results.
+  let expectedArtists = [];
+  function normalizedText(value) {
+    return typeof value === 'string'
+      ? value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase() : '';
+  }
+  const npOnly = new URLSearchParams(location.search).has('msk--np-only');
   function attachBus() {
     const bus = window.bus;
     if (!bus || typeof bus.$emit !== 'function' || values.busHookReady !== null) return;
@@ -89,6 +97,10 @@ PROBE_SCRIPT = r"""(() => {
         values.statusWithTitleCount++;
         if (values.firstStatusWithTitle === null) values.firstStatusWithTitle = now;
       }
+      if (data && data.current) {
+        expectedArtists = [data.current.artist, data.current.trackartist]
+          .map(normalizedText).filter(Boolean);
+      }
       statusDispatchDepth++;
       try { return original.apply(this, arguments); }
       finally { statusDispatchDepth--; }
@@ -114,6 +126,19 @@ PROBE_SCRIPT = r"""(() => {
     const style = window.getComputedStyle(element);
     return style.display !== 'none' && style.visibility !== 'hidden'
       && element.getClientRects().length > 0;
+  }
+  // DOM-visible, in-viewport metadata rather than hidden queue rows or pages.
+  function onScreen(element) {
+    if (!visible(element)) return false;
+    if (typeof element.checkVisibility === 'function' &&
+        !element.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return false;
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && box.right > 0 && box.bottom > 0
+      && box.left < innerWidth && box.top < innerHeight;
+  }
+  function firstVisible(root, selector, accept) {
+    return root && Array.from(root.querySelectorAll(selector))
+      .find(el => onScreen(el) && accept(el));
   }
   function placeholderImage(img) {
     const source = img.currentSrc || img.src || '';
@@ -144,17 +169,30 @@ PROBE_SCRIPT = r"""(() => {
     if (mounted && values.appReady === null) values.appReady = performance.now();
     const np = document.getElementById('np-page');
     if (mounted && visible(np) && values.npVisible === null) values.npVisible = performance.now();
-    const title = np && np.querySelector('.np-title');
-    if (mounted && visible(np) && visible(title) && title.textContent.trim()
-        && values.trackVisible === null) values.trackVisible = performance.now();
-    const cover = np && np.querySelector('img.np-cover');
-    if (mounted && visible(np) && visible(cover) && cover.complete && cover.naturalWidth > 0) {
-      if (values.coverVisible === null) values.coverVisible = performance.now();
-      // Unlike coverVisible, excludes the placeholder constants defined by Material.
-      // May still be a server-supplied generic image, hence "candidate".
-      if (values.artworkCandidateVisible === null && !placeholderImage(cover)) {
-        values.artworkCandidateVisible = performance.now();
-      }
+    // Normal UI: the desktop playback bar. NP-only: the dedicated page.
+    // Do not count the queue, a home-list item or a hidden Now Playing view.
+    const surface = npOnly ? np : document.getElementById('np-bar');
+    if (!mounted || !onScreen(surface)) return;
+    const titleSelector = npOnly ? '.np-title' : '.np-bar-details .v-list__tile__title';
+    const artistSelector = npOnly ? '.np-text.subtext, .np-text-landscape.subtext'
+      : '.np-bar-details .v-list__tile__sub-title';
+    if (values.trackVisible === null &&
+        firstVisible(surface, titleSelector, el => !!normalizedText(el.textContent))) {
+      values.trackVisible = performance.now();
+    }
+    if (values.artistVisible === null && expectedArtists.length &&
+        firstVisible(surface, artistSelector, el =>
+          expectedArtists.some(artist => normalizedText(el.textContent).includes(artist)))) {
+      values.artistVisible = performance.now();
+    }
+    const loaded = img => img.complete && img.naturalWidth > 0;
+    if (values.coverVisible === null && firstVisible(surface, 'img.np-cover', loaded)) {
+      values.coverVisible = performance.now();
+    }
+    // Exclude known placeholders. An LMS-supplied generic image may still pass.
+    if (values.artworkCandidateVisible === null &&
+        firstVisible(surface, 'img.np-cover', img => loaded(img) && !placeholderImage(img))) {
+      values.artworkCandidateVisible = performance.now();
     }
   }
   let queued = false;
@@ -210,7 +248,8 @@ JS_RESULTS = r"""() => {
   return {
     timeOrigin: performance.timeOrigin,
     marks: {appReady: timings.appReady, npVisible: timings.npVisible,
-            trackVisible: timings.trackVisible, coverVisible: timings.coverVisible,
+            trackVisible: timings.trackVisible, artistVisible: timings.artistVisible,
+             coverVisible: timings.coverVisible,
             artworkCandidateVisible: timings.artworkCandidateVisible,
             deferredFunctionReady: timings.deferredFunctionReady,
             busHookReady: timings.busHookReady,
@@ -336,6 +375,10 @@ def report_summary(rows: list[dict]) -> dict:
                 'app_ready_p90_ms': percentile(app, .9),
                 'np_visible_median_ms': median('np_visible_total_ms'),
                 'track_visible_median_ms': median('track_visible_total_ms'),
+                'track_visible_samples': sum(r.get('track_visible_total_ms') is not None for r in items),
+                'artist_visible_median_ms': median('artist_visible_total_ms'),
+                'artist_visible_samples': sum(r.get('artist_visible_total_ms') is not None for r in items),
+                'artwork_candidate_samples': sum(r.get('artwork_candidate_visible_total_ms') is not None for r in items),
                 'cover_visible_median_ms': median('cover_visible_total_ms'),
                 'artwork_candidate_median_ms': median('artwork_candidate_visible_total_ms'),
                 'deferred_function_ready_median_ms': median('deferred_function_ready_total_ms'),
@@ -474,6 +517,7 @@ async def measure(page, origin: str, view: str, mode: str, player: str | None,
         'app_ready_total_ms': total('appReady'),
         'np_visible_total_ms': total('npVisible'),
         'track_visible_total_ms': total('trackVisible'),
+        'artist_visible_total_ms': total('artistVisible'),
         'cover_visible_total_ms': total('coverVisible'),
         'artwork_candidate_visible_total_ms': total('artworkCandidateVisible'),
         'deferred_function_ready_total_ms': total('deferredFunctionReady'),
@@ -525,7 +569,10 @@ def write_reports(out: Path, rows: list[dict], config: dict) -> dict:
             writer.writerows({key: run.get(key) for key in fields} for run in rows)
     lines = ['# Material Skin startup benchmark', '',
              'Times in milliseconds. App-ready: Vue root visible, v-cloak removed.',
-             'Track/cover markers are optional; they may remain blank for an idle player.',
+             'Normal view: desktop playback bar (#np-bar); NP-only: dedicated page (#np-page).',
+             'Title/artist/artwork markers measure visible DOM, not the first painted pixel.',
+             'Artist must match a name from the observed player-status event; no names are exported.',
+             'Metadata markers are optional for idle players or missing metadata; sample counts are reported.',
              'TTFB/FCP/LCP are measured from the final document navigation and exclude the /np-only JavaScript redirect.',
              'App-ready total includes the redirect and is measured against the initial navigation.', '',
              '| View | Cache | Successful | Median app-ready | P90 app-ready | Errors |',
@@ -552,6 +599,17 @@ def write_reports(out: Path, rows: list[dict], config: dict) -> dict:
                      f'{fmt(stat["track_visible_median_ms"])} | '
                      f'{stat["retry_scheduled_runs"]}/{stat["samples"]} | '
                      f'{stat["status_before_deferred_runs"]}/{stat["samples"]} |')
+    lines.extend(['', '## Visible player metadata', '',
+                  '| View | Cache | Title (ms; samples) | Artist (ms; samples) | Artwork candidate (ms; samples) |',
+                  '| --- | --- | ---: | ---: | ---: |'])
+    for key, stat in summary.items():
+        view, cache = key.split('/')
+        def cell(metric, count):
+            return f'{fmt(stat[metric])} ({stat[count]}/{stat["samples"]})'
+        lines.append(f'| {view} | {cache} | '
+                     f'{cell("track_visible_median_ms", "track_visible_samples")} | '
+                     f'{cell("artist_visible_median_ms", "artist_visible_samples")} | '
+                     f'{cell("artwork_candidate_median_ms", "artwork_candidate_samples")} |')
     lines.extend(['', 'Cover candidate excludes Material Skin placeholder constants; it can still be a generic server image.',
                   'Network request windows (in results.json) are relative to the **final** document, unlike total timings.',
                   'Request durations overlap and are not additive.'])
