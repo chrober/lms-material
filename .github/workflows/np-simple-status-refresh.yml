@@ -1,0 +1,53 @@
+name: Deferred status refresh experiment
+
+on:
+  push:
+    branches:
+      - experiment/np-refresh-on-deferred-load
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run Node regression tests
+        run: |
+          node --check MaterialSkin/HTML/material/html/js/nowplaying-page.js
+          node --test tests/*.test.js
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install build dependency
+        run: python -m pip install requests
+      - name: Build test plugin
+        run: python mkrel.py test
+      - name: Verify packaged frontend
+        run: |
+          python - <<'PY'
+          from zipfile import ZipFile
+          with ZipFile('lms-material-test.zip') as bundle:
+              scripts = [name for name in bundle.namelist() if name.endswith('/js/material.min.js')]
+              assert len(scripts) == 1, scripts
+              source = bundle.read(scripts[0])
+              assert b'material-deferred' in source
+              assert b'nowplaying-functions' in source
+              assert b'refreshStatus' in source
+          print('The minimal refresh listener is included in the bundled plugin')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lms-material-simple-status-refresh-test
+          path: lms-material-test.zip
+          retention-days: 14
