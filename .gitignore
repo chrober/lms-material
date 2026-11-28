@@ -29,3 +29,8 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+
+# Local Material Skin performance benchmarking artifacts
+performance/.venv/
+performance/__pycache__/
+performance/results/
